@@ -1,0 +1,2 @@
+CREATE OR REPLACE FUNCTION `bd-ml-bigquery.keepcoding.clean_integer`(p_int INT64) RETURNS INT64 AS (
+(SELECT IFNULL(p_int ,-999999)  ))
