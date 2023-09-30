@@ -1,0 +1,176 @@
+CREATE OR REPLACE TABLE keepcoding.ivr_summary AS
+WITH 
+      calls_phone
+  AS(SELECT  
+        CAST(ivr_id AS STRING) AS id
+        ,COALESCE(phone_number) as phone_number
+        FROM 
+        `bd-ml-bigquery.keepcoding.ivr_calls` calls
+        WHERE phone_number <> 'NULL'
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY phone_number) = 1
+        )
+      ,phone_details
+  AS(SELECT 
+        CAST(calls_ivr_id AS STRING) AS id
+        ,COALESCE(calls_phone_number) as phone_number	
+        FROM 
+        `bd-ml-bigquery.keepcoding.ivr_details` details
+        WHERE calls_phone_number <> 'NULL'
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY  phone_number) = 1 
+        )
+
+      ,identity_detail
+  AS(SELECT 
+        CAST(calls_ivr_id AS STRING) AS id
+        ,document_type as document_type					
+        ,document_identification AS document_identification
+        FROM 
+        `bd-ml-bigquery.keepcoding.ivr_details`
+        WHERE document_type <> 'NULL'
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY  document_type) = 1
+        )
+     ,identity_steps
+  AS(SELECT 
+        CAST(ivr_id AS STRING) AS id
+        ,document_type as document_type					
+        ,document_identification AS document_identification
+        FROM 
+        `bd-ml-bigquery.keepcoding.ivr_steps`
+        WHERE document_type <> 'NULL'
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY  document_type) = 1 
+        )
+
+      ,steps_phone
+  AS(SELECT
+        CAST(ivr_id AS STRING) AS id
+        ,COALESCE(customer_phone) as customer_phone	
+        FROM 
+        `bd-ml-bigquery.keepcoding.ivr_steps` steps
+        WHERE customer_phone <> 'NULL'
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY  customer_phone) = 1 
+        )
+
+
+      ,billing_account_steps
+  AS(SELECT 
+        CAST(ivr_id AS STRING) AS id
+        ,COALESCE(billing_account_id) AS billing_account
+        FROM 
+        `bd-ml-bigquery.keepcoding.ivr_steps` steps
+        WHERE billing_account_id <> 'NULL'
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY billing_account) = 1
+        )
+
+      ,billing_account_details
+ AS(SELECT 
+        CAST(calls_ivr_id AS STRING) AS id
+        ,COALESCE(billing_account_id) as billing_account	
+        FROM 
+        `bd-ml-bigquery.keepcoding.ivr_details` details
+        WHERE billing_account_id <> 'NULL'
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY  billing_account) = 1 
+        )
+
+      ,detail_modules
+ AS(SELECT 
+        CAST(calls_ivr_id AS STRING) AS id
+        ,COALESCE(module_name) as module_name	
+        FROM 
+        `bd-ml-bigquery.keepcoding.ivr_details` detail
+        WHERE module_name <> 'NULL'
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY  module_name) = 1 
+        )
+
+      ,detail_by_phone
+ AS( SELECT 
+        CAST(detail.calls_ivr_id as STRING) AS id
+        FROM 
+        `bd-ml-bigquery.keepcoding.ivr_details` detail
+        where detail.step_name = 'CUSTOMERINFOBYDNI.TX' AND detail.step_description_error = 'NULL'
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY  detail.step_name ORDER BY detail.step_description_error ) = 1 
+        )
+      ,calls_review
+ AS(SELECT 
+        CAST(calls_ivr_id AS STRING) AS id
+        ,calls_phone_number as phone_number
+        ,calls_start_date AS call_date				
+         FROM 
+        `bd-ml-bigquery.keepcoding.ivr_details`
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY calls_phone_number ORDER BY  calls_start_date desc )=1 
+
+ )
+SELECT 
+     detail.calls_ivr_id
+    ,COALESCE(calls_phone.phone_number, phone_details.phone_number,'DESCONOCIDO') AS phone_number
+    ,IFNULL(detail.calls_ivr_result,'DESCONOCIDO') AS ivr_result
+    ,CASE WHEN detail.calls_vdn_label LIKE 'ATC%' THEN 'FRONT'
+          WHEN detail.calls_vdn_label LIKE 'TECH%' THEN 'TECH'
+          WHEN detail.calls_vdn_label LIKE 'ABSORPTION%' THEN 'ABSORPTION'
+          ELSE 'RESTO'
+          END AS vdn_aggregation
+    ,IFNULL(detail.calls_start_date,'9999-12-31') AS start_date
+    ,IFNULL(detail.calls_end_date,'9999-12-31') AS end_date
+    ,IFNULL(detail.calls_total_duration,999999) AS total_duration
+    ,IFNULL(detail.calls_customer_segment ,'DESCONOCIDO') AS customer_segment
+    ,IFNULL(detail.calls_ivr_language ,'DESCONOCIDO') AS ivr_language
+    ,IFNULL(detail.calls_steps_module,999999) AS steps_module
+    ,COALESCE(detail.calls_module_aggregation,'DESCONOCIDO') AS module_aggregation
+    ,UPPER(COALESCE(identity_detail.document_type, identity_steps.document_type, 'DESCONOCIDO')) AS document_type
+    ,COALESCE(identity_detail.document_identification, identity_steps.document_identification, 'DESCONOCIDO') AS document_identification
+    ,IFNULL(steps_phone.customer_phone, 'DESCONOCIDO') AS customer_phone
+    ,COALESCE(billing_account_steps.billing_account, billing_account_details.billing_account, 'DESCONOCIDO') AS billing_acount
+    ,IF(detail_modules.module_name = 'AVERIA_MASIVA',1, 0) AS masiva_lg
+    ,MAX(IF(detail.step_name = 'CUSTOMERINFOBYPHONE.TX' AND detail.step_description_error = 'NULL',1,0)) AS info_by_phone_lg
+    ,MAX(IF(detail.step_name = 'CUSTOMERINFOBYDNI.TX' AND detail.step_description_error = 'NULL',1,0)) AS info_by_DNI_lg
+    ,MAX(IF(calls_review.call_date > DATETIME_SUB(detail.calls_start_date,INTERVAL 24 HOUR)AND calls_review.phone_number = detail.calls_phone_number,1,0))as repeated_phone_24h
+    ,MAX(IF(calls_review.call_date < DATETIME_ADD(detail.calls_start_date,INTERVAL 24 HOUR)AND calls_review.phone_number = detail.calls_phone_number,1,0))as cause_recall_phone_24h  
+  from 
+  `bd-ml-bigquery.keepcoding.ivr_details` detail
+  LEFT
+  JOIN calls_phone
+  ON detail.calls_ivr_id = CAST(calls_phone.id AS FLOAT64)
+  LEFT 
+  JOIN phone_details
+  ON detail.calls_ivr_id = CAST(phone_details.id AS FLOAT64)
+  LEFT
+  JOIN identity_detail
+  ON detail.calls_ivr_id = CAST(identity_detail.id AS FLOAT64)
+  LEFT 
+  JOIN identity_steps
+  ON detail.calls_ivr_id = CAST(identity_steps.id AS FLOAT64)
+  LEFT 
+  JOIN steps_phone
+  ON detail.calls_ivr_id = CAST(steps_phone.id AS FLOAT64)
+  LEFT 
+  JOIN billing_account_steps
+  ON detail.calls_ivr_id = CAST(billing_account_steps.id AS FLOAT64)
+  LEFT 
+  JOIN billing_account_details
+  ON detail.calls_ivr_id = CAST(billing_account_details.id AS FLOAT64)
+  LEFT 
+  JOIN detail_modules
+  ON detail.calls_ivr_id = CAST(detail_modules.id AS FLOAT64)
+  LEFT 
+  JOIN detail_by_phone
+  ON detail.calls_ivr_id = CAST(detail_by_phone.id AS FLOAT64)
+  LEFT 
+  JOIN calls_review
+  ON calls_review.phone_number = detail.calls_phone_number  
+  group by calls_ivr_id
+  ,phone_number
+  ,ivr_result
+  ,vdn_aggregation 
+  ,start_date 
+  ,end_date
+  ,total_duration
+  ,customer_segment
+  ,ivr_language 
+  ,steps_module
+  ,module_aggregation
+  ,document_type
+  ,document_identification
+  ,customer_phone
+  ,billing_acount
+  ,masiva_lg
+  
+  
